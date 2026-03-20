@@ -62,26 +62,101 @@ type ChatResponse struct {
 type OCRBlock struct {
 	Index   int         `json:"index"`
 	Label   string      `json:"label"`
-	Content string      `json:"content"`
+	Content interface{} `json:"content"`
 	BBox2D  interface{} `json:"bbox_2d"`
 }
 
 func parseOCRContent(raw string) (pages [][]OCRBlock, structured bool) {
 	raw = strings.TrimSpace(raw)
-	
-	// Try to find a JSON array in the string (it might be surrounded by text or markdown)
-	start := strings.Index(raw, "[[")
-	end := strings.LastIndex(raw, "]]")
-	if start != -1 && end != -1 && end > start {
-		jsonPart := raw[start : end+2]
-		if err := json.Unmarshal([]byte(jsonPart), &pages); err == nil && len(pages) > 0 {
-			return pages, true
+
+	// Clean Markdown code blocks if any (model might return JSON or text inside backticks)
+	cleanRaw := raw
+	if strings.HasPrefix(raw, "```") {
+		lines := strings.Split(raw, "\n")
+		if len(lines) > 2 {
+			cleanRaw = strings.Join(lines[1:len(lines)-1], "\n")
+		} else {
+			cleanRaw = strings.Trim(raw, "`")
+			// Remove leading language name if any
+			if strings.HasPrefix(cleanRaw, "json\n") {
+				cleanRaw = cleanRaw[5:]
+			}
+		}
+		cleanRaw = strings.TrimSpace(cleanRaw)
+	}
+
+	// Try to find a JSON array in the cleaned raw string or original
+	for _, s := range []string{cleanRaw, raw} {
+		start := strings.Index(s, "[")
+		end := strings.LastIndex(s, "]")
+		if start != -1 && end != -1 && end > start {
+			jsonPart := s[start : end+1]
+
+			// Case 1: [[{...}, {...}]] - Array of pages (each page is an array of blocks)
+			if err := json.Unmarshal([]byte(jsonPart), &pages); err == nil && len(pages) > 0 {
+				return pages, true
+			}
+
+			// Case 2: [{...}, {...}] - Single array of blocks (treat as one page)
+			var singlePage []OCRBlock
+			if err := json.Unmarshal([]byte(jsonPart), &singlePage); err == nil && len(singlePage) > 0 {
+				return [][]OCRBlock{singlePage}, true
+			}
 		}
 	}
 
+	// Fallback: Split raw text into individual blocks if it's not JSON
+	var blocks []OCRBlock
+	lines := strings.Split(cleanRaw, "\n")
+	index := 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		label := "text"
+		if strings.HasPrefix(line, "#") {
+			label = "title"
+		} else if isListItem(line) {
+			label = "list_item"
+		}
+
+		blocks = append(blocks, OCRBlock{
+			Index:   index,
+			Label:   label,
+			Content: line,
+		})
+		index++
+	}
+
+	if len(blocks) > 0 {
+		return [][]OCRBlock{blocks}, false
+	}
 	return [][]OCRBlock{{{Index: 0, Label: "text", Content: raw}}}, false
 }
 
+func isListItem(s string) bool {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "- ") || strings.HasPrefix(s, "* ") {
+		return true
+	}
+	// Check for "1. ", "2. ", etc.
+	if len(s) > 2 && s[0] >= '0' && s[0] <= '9' {
+		for i := 1; i < len(s); i++ {
+			if s[i] == '.' {
+				if i+1 < len(s) && s[i+1] == ' ' {
+					return true
+				}
+				break
+			}
+			if s[i] < '0' || s[i] > '9' {
+				break
+			}
+		}
+	}
+	return false
+}
 // ---------------------------------------------------------------------------
 // Output formatters
 // ---------------------------------------------------------------------------
@@ -93,7 +168,25 @@ func renderMarkdown(pages [][]OCRBlock) string {
 			fmt.Fprintf(&sb, "\n---\n<!-- page %d -->\n\n", pi+1)
 		}
 		for _, b := range page {
-			content := strings.TrimSpace(b.Content)
+			var content string
+			switch v := b.Content.(type) {
+			case string:
+				content = strings.TrimSpace(v)
+			case []interface{}:
+				var items []string
+				for _, item := range v {
+					s := fmt.Sprint(item)
+					if s != "" && !strings.HasPrefix(s, "- ") && !strings.HasPrefix(s, "* ") {
+						items = append(items, "- "+s)
+					} else {
+						items = append(items, s)
+					}
+				}
+				content = strings.Join(items, "\n")
+			default:
+				content = fmt.Sprint(b.Content)
+			}
+
 			if content == "" {
 				continue
 			}
@@ -155,7 +248,7 @@ type JSONOutputBlock struct {
 	Page    int         `json:"page"`
 	Index   int         `json:"index"`
 	Label   string      `json:"label"`
-	Content string      `json:"content"`
+	Content interface{} `json:"content"`
 	BBox2D  interface{} `json:"bbox_2d"`
 }
 
