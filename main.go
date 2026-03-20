@@ -69,11 +69,28 @@ type OCRBlock struct {
 	BBox2D  interface{} `json:"bbox_2d"`
 }
 
-func parseOCRContent(raw string) (pages [][]OCRBlock, structured bool) {
+func parseOCRContent(raw string, pageCount int) (pages [][]OCRBlock, structured bool) {
 	raw = strings.TrimSpace(raw)
-	if err := json.Unmarshal([]byte(raw), &pages); err == nil && len(pages) > 0 {
-		return pages, true
+	
+	// Try to find a JSON array in the string (it might be surrounded by text or markdown)
+	start := strings.Index(raw, "[[")
+	end := strings.LastIndex(raw, "]]")
+	if start != -1 && end != -1 && end > start {
+		jsonPart := raw[start : end+2]
+		if err := json.Unmarshal([]byte(jsonPart), &pages); err == nil && len(pages) > 0 {
+			return pages, true
+		}
 	}
+
+	// If not structured, and we have multiple pages, try to split the plain text 
+	// (this is a heuristic, usually the model returns structured data for multi-page)
+	if pageCount > 1 {
+		// If the model returned plain text for multiple images, it often puts them 
+		// all together. We don't have a good way to split it back to pages perfectly 
+		// without markers, so we just treat it as one large page 1 for now.
+		return [][]OCRBlock{{{Index: 0, Label: "text", Content: raw}}}, false
+	}
+	
 	return [][]OCRBlock{{{Index: 0, Label: "text", Content: raw}}}, false
 }
 
@@ -309,26 +326,56 @@ func run(args []string) error {
 		fmt.Fprintln(os.Stderr, `
 Examples:
   ocr scan.png
-  ocr document.pdf
+  ocr -output result.md document.pdf
+  ocr document.pdf -output result.md
   ocr --text --output result.txt invoice.pdf
   ocr --json --output result.json photo.jpg
   ocr --embed --endpoint http://10.0.0.5 --port 9000 doc.pdf
   ocr --raw scan.png`)
 	}
 
-	if err := fs.Parse(args); err != nil {
+	// Separate flags and the positional file argument --------------------------
+	var flags []string
+	var files []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			// If it's a flag that takes a value (like -output), grab the next arg too
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				// These specific flags take values:
+				valFlags := []string{"-endpoint", "--endpoint", "-port", "--port", "-model", "--model", "-prompt", "--prompt", "-output", "--output"}
+				isValFlag := false
+				for _, vf := range valFlags {
+					if arg == vf {
+						isValFlag = true
+						break
+					}
+				}
+				if isValFlag {
+					flags = append(flags, args[i+1])
+					i++
+				}
+			}
+		} else {
+			files = append(files, arg)
+		}
+	}
+
+	if err := fs.Parse(flags); err != nil {
 		return err
 	}
+
 	if *showVer {
 		fmt.Printf("ocr %s\n", version)
 		return nil
 	}
-	if fs.NArg() < 1 {
+	if len(files) < 1 {
 		fs.Usage()
 		return fmt.Errorf("no input file specified")
 	}
 
-	inputFile := fs.Arg(0)
+	inputFile := files[0]
 	if _, err := os.Stat(inputFile); err != nil {
 		return fmt.Errorf("cannot access %q: %w", inputFile, err)
 	}
@@ -391,7 +438,7 @@ Examples:
 	}
 
 	// Parse & render -----------------------------------------------------------
-	pages, structured := parseOCRContent(content)
+	pages, structured := parseOCRContent(content, len(imageURIs))
 	if !structured {
 		fmt.Fprintln(os.Stderr, "⚠ response is not structured JSON — rendered as plain content")
 	}
