@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const defaultPrompt = "Extract all text from this document"
@@ -56,10 +57,6 @@ type ChatResponse struct {
 
 // ---------------------------------------------------------------------------
 // GLM-OCR structured response
-//
-// choices[0].message.content is a JSON string:
-//   [[{"index":0,"label":"text","content":"…","bbox_2d":null}, …], …]
-// Outer array = pages, inner = blocks per page.
 // ---------------------------------------------------------------------------
 
 type OCRBlock struct {
@@ -69,7 +66,7 @@ type OCRBlock struct {
 	BBox2D  interface{} `json:"bbox_2d"`
 }
 
-func parseOCRContent(raw string, pageCount int) (pages [][]OCRBlock, structured bool) {
+func parseOCRContent(raw string) (pages [][]OCRBlock, structured bool) {
 	raw = strings.TrimSpace(raw)
 	
 	// Try to find a JSON array in the string (it might be surrounded by text or markdown)
@@ -82,15 +79,6 @@ func parseOCRContent(raw string, pageCount int) (pages [][]OCRBlock, structured 
 		}
 	}
 
-	// If not structured, and we have multiple pages, try to split the plain text 
-	// (this is a heuristic, usually the model returns structured data for multi-page)
-	if pageCount > 1 {
-		// If the model returned plain text for multiple images, it often puts them 
-		// all together. We don't have a good way to split it back to pages perfectly 
-		// without markers, so we just treat it as one large page 1 for now.
-		return [][]OCRBlock{{{Index: 0, Label: "text", Content: raw}}}, false
-	}
-	
 	return [][]OCRBlock{{{Index: 0, Label: "text", Content: raw}}}, false
 }
 
@@ -224,8 +212,6 @@ func mimeType(path string) string {
 	}
 }
 
-// toFileURI returns an absolute file:// URI.
-// Used when the server runs locally and can read the filesystem directly.
 func toFileURI(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -234,8 +220,6 @@ func toFileURI(path string) (string, error) {
 	return "file://" + filepath.ToSlash(abs), nil
 }
 
-// toDataURI base64-encodes the file and returns a data: URI.
-// Used when the server is remote and can't access the local filesystem.
 func toDataURI(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -248,6 +232,10 @@ func toDataURI(path string) (string, error) {
 // ---------------------------------------------------------------------------
 // HTTP call
 // ---------------------------------------------------------------------------
+
+var httpClient = &http.Client{
+	Timeout: 5 * time.Minute,
+}
 
 func callAPI(apiURL, model, promptText string, imageURIs []string) (*ChatResponse, error) {
 	var content []ContentPart
@@ -279,7 +267,7 @@ func callAPI(apiURL, model, promptText string, imageURIs []string) (*ChatRespons
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP: %w", err)
 	}
@@ -313,12 +301,13 @@ func run(args []string) error {
 	model      := fs.String("model", "zai-org/GLM-OCR", "Model name")
 	prompt     := fs.String("prompt", defaultPrompt, "Instruction sent with the file")
 	outputFile := fs.String("output", "", "Write output to file instead of stdout")
-	fmtMD      := fs.Bool("markdown", false, "Output as Markdown (default)")
+	_          = fs.Bool("markdown", false, "Output as Markdown (default)")
 	fmtText    := fs.Bool("text", false, "Output as plain text")
 	fmtJSON    := fs.Bool("json", false, "Output as JSON")
 	embed      := fs.Bool("embed", false, "Send file as base64 data URI (use for remote servers)")
 	rawMode    := fs.Bool("raw", false, "Dump raw model response and exit (debug)")
 	showVer    := fs.Bool("version", false, "Print version and exit")
+	dpi        := fs.Int("dpi", 200, "Rendering resolution for PDF pages")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "ocr %s\n\nUsage: ocr [options] <file>\n\nOptions:\n", version)
@@ -328,31 +317,20 @@ Examples:
   ocr scan.png
   ocr -output result.md document.pdf
   ocr document.pdf -output result.md
-  ocr --text --output result.txt invoice.pdf
-  ocr --json --output result.json photo.jpg
-  ocr --embed --endpoint http://10.0.0.5 --port 9000 doc.pdf
-  ocr --raw scan.png`)
+  ocr --text --output result.txt invoice.pdf`)
 	}
 
-	// Separate flags and the positional file argument --------------------------
+	// Simple robust flag separation
 	var flags []string
 	var files []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
-			// If it's a flag that takes a value (like -output), grab the next arg too
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				// These specific flags take values:
-				valFlags := []string{"-endpoint", "--endpoint", "-port", "--port", "-model", "--model", "-prompt", "--prompt", "-output", "--output"}
-				isValFlag := false
-				for _, vf := range valFlags {
-					if arg == vf {
-						isValFlag = true
-						break
-					}
-				}
-				if isValFlag {
+			// Match flags that take values
+			switch strings.TrimLeft(arg, "-") {
+			case "endpoint", "port", "model", "prompt", "output", "dpi":
+				if i+1 < len(args) {
 					flags = append(flags, args[i+1])
 					i++
 				}
@@ -380,7 +358,6 @@ Examples:
 		return fmt.Errorf("cannot access %q: %w", inputFile, err)
 	}
 
-	// Build endpoint URL -------------------------------------------------------
 	base := strings.TrimRight(*endpoint, "/")
 	if *port != 0 {
 		if idx := strings.LastIndex(base, ":"); idx > strings.Index(base, "//") {
@@ -390,14 +367,13 @@ Examples:
 	}
 	apiURL := base + "/v1/chat/completions"
 
-	// Build image URIs ---------------------------------------------------------
 	var imageURIs []string
 	isPDF := strings.ToLower(filepath.Ext(inputFile)) == ".pdf"
 
 	if isPDF {
-		fmt.Fprintf(os.Stderr, "→ rendering PDF to images...\n")
+		fmt.Fprintf(os.Stderr, "→ rendering PDF to images (%d DPI)...\n", *dpi)
 		var err error
-		imageURIs, err = renderPDFToDataURIs(inputFile)
+		imageURIs, err = renderPDFToDataURIs(inputFile, *dpi)
 		if err != nil {
 			return fmt.Errorf("rendering PDF: %w", err)
 		}
@@ -415,49 +391,56 @@ Examples:
 		imageURIs = []string{uri}
 	}
 
-	// Call API -----------------------------------------------------------------
-	fmt.Fprintf(os.Stderr, "→ POST %s  [model: %s] [%d image(s)]\n", apiURL, *model, len(imageURIs))
+	fmt.Fprintf(os.Stderr, "→ POST %s [model: %s] [total: %d page(s)]\n", apiURL, *model, len(imageURIs))
 
-	cr, err := callAPI(apiURL, *model, *prompt, imageURIs)
+	var allPages [][]OCRBlock
+	for i, uri := range imageURIs {
+		if len(imageURIs) > 1 {
+			fmt.Fprintf(os.Stderr, "  → processing page %d/%d...\n", i+1, len(imageURIs))
+		}
+		
+		cr, err := callAPI(apiURL, *model, *prompt, []string{uri})
+		if err != nil {
+			return fmt.Errorf("API call for page %d: %w", i+1, err)
+		}
+		if cr.Error != nil {
+			return fmt.Errorf("API error on page %d: %s", i+1, cr.Error.Message)
+		}
+		if len(cr.Choices) == 0 {
+			return fmt.Errorf("no choices on page %d", i+1)
+		}
 
-	if err != nil {
-		return err
-	}
-	if cr.Error != nil {
-		return fmt.Errorf("API error: %s", cr.Error.Message)
-	}
-	if len(cr.Choices) == 0 {
-		return fmt.Errorf("no choices in response")
-	}
+		content := cr.Choices[0].Message.Content
+		if *rawMode {
+			fmt.Println(content)
+			continue
+		}
 
-	content := cr.Choices[0].Message.Content
+		pages, _ := parseOCRContent(content)
+		// We expect parseOCRContent to return exactly one page for a single image request
+		if len(pages) > 0 {
+			allPages = append(allPages, pages[0])
+		}
+	}
 
 	if *rawMode {
-		fmt.Println(content)
 		return nil
 	}
 
-	// Parse & render -----------------------------------------------------------
-	pages, structured := parseOCRContent(content, len(imageURIs))
-	if !structured {
-		fmt.Fprintln(os.Stderr, "⚠ response is not structured JSON — rendered as plain content")
-	}
-
 	var result string
+	var err error
 	switch {
 	case *fmtJSON:
-		result, err = renderJSON(pages, inputFile, *model)
+		result, err = renderJSON(allPages, inputFile, *model)
 		if err != nil {
 			return fmt.Errorf("encoding JSON: %w", err)
 		}
 	case *fmtText:
-		result = renderPlainText(pages)
+		result = renderPlainText(allPages)
 	default:
-		_ = *fmtMD
-		result = renderMarkdown(pages)
+		result = renderMarkdown(allPages)
 	}
 
-	// Write output -------------------------------------------------------------
 	if *outputFile != "" {
 		if err := os.WriteFile(*outputFile, []byte(result+"\n"), 0644); err != nil {
 			return fmt.Errorf("writing %s: %w", *outputFile, err)

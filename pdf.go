@@ -37,7 +37,7 @@ func initPDFium() error {
 	return nil
 }
 
-func renderPDFToDataURIs(path string) ([]string, error) {
+func renderPDFToDataURIs(path string, dpi int) ([]string, error) {
 	if err := initPDFium(); err != nil {
 		return nil, err
 	}
@@ -72,7 +72,6 @@ func renderPDFToDataURIs(path string) ([]string, error) {
 
 	var dataURIs []string
 	for i := 0; i < pageCount.PageCount; i++ {
-		// Render page to image (300 DPI is standard for OCR)
 		resp, err := instance.RenderPageInDPI(&requests.RenderPageInDPI{
 			Page: requests.Page{
 				ByIndex: &requests.PageByIndex{
@@ -80,14 +79,13 @@ func renderPDFToDataURIs(path string) ([]string, error) {
 					Index:    i,
 				},
 			},
-			DPI: 300,
+			DPI: dpi,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("rendering page %d: %w", i, err)
 		}
 
 		var buf bytes.Buffer
-		// Encode as JPEG for smaller payload (OCR works fine with high-quality JPEG)
 		if err := jpeg.Encode(&buf, resp.Result.Image, &jpeg.Options{Quality: 90}); err != nil {
 			return nil, fmt.Errorf("encoding page %d to JPEG: %w", i, err)
 		}

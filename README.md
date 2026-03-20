@@ -14,7 +14,7 @@ A lightweight, **self-contained** CLI that extracts structured text from images 
 
 - 🚀 **Zero Dependencies**: Built with pure Go + WebAssembly. No need for `poppler`, `mupdf`, or any system-level PDF tools.
 - 📦 **Self-Contained**: PDF rendering is embedded inside the binary. Single file, works everywhere.
-- 📑 **Multi-Page PDF Support**: Automatically renders PDF pages to images and sends them in a single batch.
+- 📑 **Robust Multi-Page PDF Support**: Renders pages locally and processes them sequentially to avoid GPU memory limits.
 - 🎯 **Multiple Outputs**: Get results in **Markdown**, **Plain Text**, or **JSON**.
 - 🌍 **Cross-Platform**: Compiled for Linux, macOS, and Windows (AMD64 & ARM64).
 
@@ -38,6 +38,8 @@ The resulting binaries will be in the `dist/` folder.
 
 ## 📖 Usage
 
+The CLI supports flags in any position (before or after the input file). You can use either a single dash `-` or a double dash `--`.
+
 ```bash
 ocr [options] <file>
 ```
@@ -46,15 +48,16 @@ ocr [options] <file>
 
 | Flag | Description | Default |
 | :--- | :--- | :--- |
-| `--endpoint` | API base URL | `http://localhost:8080` |
-| `--model` | Model name | `zai-org/GLM-OCR` |
-| `--prompt` | Instruction sent with the file | `Extract all text from this document` |
-| `--output` | Write output to file instead of stdout | `stdout` |
-| `--markdown` | Output as Markdown | `true` |
-| `--text` | Output as plain text (flattens tables) | `false` |
-| `--json` | Output as structured JSON | `false` |
-| `--embed` | Send files as base64 data-URIs | `false` |
-| `--raw` | Dump raw model response (debug) | `false` |
+| `-endpoint` | API base URL | `http://localhost:8080` |
+| `-model` | Model name | `zai-org/GLM-OCR` |
+| `-prompt` | Instruction sent with the file | `Extract all text from this document` |
+| `-output` | Write output to file instead of stdout | `stdout` |
+| `-dpi` | PDF rendering resolution | `200` |
+| `-markdown` | Output as Markdown | `true` |
+| `-text` | Output as plain text (flattens tables) | `false` |
+| `-json` | Output as structured JSON | `false` |
+| `-embed` | Send files as base64 data-URIs | `false` |
+| `-raw` | Dump raw model response (debug) | `false` |
 
 ---
 
@@ -66,22 +69,22 @@ Prints formatted Markdown to your terminal:
 ocr scan.png
 ```
 
-### Multi-page PDF
-Renders all pages and combines them into a single Markdown document:
+### Multi-page PDF to File
+Renders all pages and combines them into a single Markdown document. Flags can follow the filename:
 ```bash
-ocr document.pdf
+ocr document.pdf -output result.md -dpi 150
 ```
 
 ### Remote Server
-Use `--embed` if the vLLM server is on a different machine and cannot access your local filesystem:
+Use `-embed` if the vLLM server is on a different machine and cannot access your local filesystem:
 ```bash
-ocr --embed --endpoint http://10.0.0.5 --port 8080 invoice.pdf
+ocr -embed -endpoint http://10.0.0.5 invoice.pdf
 ```
 
 ### Structured Data
 Extract raw JSON data for programmatic use:
 ```bash
-ocr --json --output result.json document.pdf
+ocr -json -output result.json document.pdf
 ```
 
 ---
@@ -90,21 +93,21 @@ ocr --json --output result.json document.pdf
 
 The **GLM-OCR** model requires images as input. Since it cannot process raw PDF blobs directly, this CLI performs the following steps:
 
-1. **PDF Rendering**: Uses `go-pdfium` running on the `wazero` WebAssembly engine to render PDF pages into 300 DPI images.
-2. **API Interaction**: All rendered images are sent as a sequence of `image_url` parts in a single `v1/chat/completions` request.
-3. **Structured Parsing**: The model returns a JSON array of pages. The CLI parses this and renders it through the selected formatter.
+1. **PDF Rendering**: Uses `go-pdfium` running on the `wazero` WebAssembly engine to render PDF pages into images. The default is **200 DPI**, which is optimal for balance between speed and OCR quality.
+2. **Sequential Processing**: To ensure reliability and avoid overwhelming the GPU or hitting context limits, pages are processed one by one. The CLI prints real-time progress for each page.
+3. **Structured Parsing**: The results are combined and parsed into the chosen format. If the model returns mixed content, the CLI extracts the JSON part automatically.
 
 ---
 
 ## 📦 Output Formats
 
 ### 📝 Markdown (Default)
-Maps block labels (title, text, table, figure) to appropriate Markdown elements. Multi-page documents are separated by `---` lines.
+Maps block labels (title, text, table, figure) to appropriate Markdown elements. Multi-page documents are separated by `---` lines and include page comments.
 
-### 📄 Plain Text (`--text`)
+### 📄 Plain Text (`-text`)
 Strips all Markdown decoration and flattens tables for easy copy-pasting or grep-ing.
 
-### 🔢 JSON (`--json`)
+### 🔢 JSON (`-json`)
 Returns a full structured object containing the source path, model used, and a list of all detected blocks with their coordinates (`bbox_2d`).
 
 ---
