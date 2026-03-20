@@ -304,7 +304,7 @@ func run(args []string) error {
 	_          = fs.Bool("markdown", false, "Output as Markdown (default)")
 	fmtText    := fs.Bool("text", false, "Output as plain text")
 	fmtJSON    := fs.Bool("json", false, "Output as JSON")
-	embed      := fs.Bool("embed", false, "Send file as base64 data URI (use for remote servers)")
+	embed      := fs.Bool("embed", false, "Force sending file as base64 data URI (auto-enabled for remote endpoints)")
 	rawMode    := fs.Bool("raw", false, "Dump raw model response and exit (debug)")
 	showVer    := fs.Bool("version", false, "Print version and exit")
 	dpi        := fs.Int("dpi", 200, "Rendering resolution for PDF pages")
@@ -380,7 +380,12 @@ Examples:
 	} else {
 		var uri string
 		var err error
-		if *embed {
+		
+		// Auto-detect if we should embed because endpoint is remote
+		isLocal := strings.Contains(base, "localhost") || strings.Contains(base, "127.0.0.1") || strings.Contains(base, "[::1]")
+		useDataURI := *embed || !isLocal
+
+		if useDataURI {
 			uri, err = toDataURI(inputFile)
 		} else {
 			uri, err = toFileURI(inputFile)
