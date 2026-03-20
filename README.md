@@ -1,133 +1,113 @@
-# ocr-cli
+# 📄 GLM-OCR CLI
 
-A lightweight CLI that sends images or PDFs to a GLM-OCR (or any OpenAI-compatible)
-chat-completions endpoint and renders the result as **Markdown**, **plain text**, or **JSON**.
+[![Go Report Card](https://goreportcard.com/badge/github.com/mamorett/glm-ocr)](https://goreportcard.com/report/github.com/mamorett/glm-ocr)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Dependencies
+A lightweight, **self-contained** CLI that extracts structured text from images and multi-page PDFs using the **GLM-OCR** model.
 
-One pure-Go module, no CGo, no system tools required:
+> [!IMPORTANT]
+> This tool is designed to work with any OpenAI-compatible chat-completions endpoint (like vLLM) hosting the `zai-org/GLM-OCR` model.
 
-| Module | Purpose |
-|---|---|
-| `github.com/pdfcpu/pdfcpu` | Split multi-page PDFs into single-page files before sending |
+---
 
-## Build
+## ✨ Key Features
+
+- 🚀 **Zero Dependencies**: Built with pure Go + WebAssembly. No need for `poppler`, `mupdf`, or any system-level PDF tools.
+- 📦 **Self-Contained**: PDF rendering is embedded inside the binary. Single file, works everywhere.
+- 📑 **Multi-Page PDF Support**: Automatically renders PDF pages to images and sends them in a single batch.
+- 🎯 **Multiple Outputs**: Get results in **Markdown**, **Plain Text**, or **JSON**.
+- 🌍 **Cross-Platform**: Compiled for Linux, macOS, and Windows (AMD64 & ARM64).
+
+---
+
+## 🛠️ Build & Install
+
+Ensure you have **Go 1.25+** installed.
 
 ```bash
-# Fetch dependency and build for the current platform
-go mod tidy
+# Clone and build for your current platform
 go build -o ocr .
 
-# Cross-compile for all platforms (output → ./dist/)
+# Cross-compile for all supported platforms
 make all
 ```
 
-Supported targets: `linux/amd64`, `linux/arm64`, `linux/arm`,
-`darwin/amd64`, `darwin/arm64`, `windows/amd64`, `windows/arm64`.
+The resulting binaries will be in the `dist/` folder.
 
-## Usage
+---
 
-```
-ocr [options] <file>
-
-Options:
-  -endpoint string   API base URL                          (default "http://localhost:8080")
-  -port     int      Override port in --endpoint
-  -model    string   Model name                            (default "zai-org/GLM-OCR")
-  -prompt   string   Instruction sent with the file        (default "Extract all text from this document")
-  -output   string   Write output to file instead of stdout
-  -markdown          Output as Markdown (default)
-  -text              Output as plain text (strips MD decoration, flattens tables)
-  -json              Output as JSON  {source, model, pages, blocks:[]}
-  -embed             Send files as base64 data-URIs instead of file:// URIs
-  -raw               Dump raw model content string and exit (debug)
-  -version           Print version and exit
-```
-
-## Examples
+## 📖 Usage
 
 ```bash
-# Basic — prints Markdown to stdout
+ocr [options] <file>
+```
+
+### Options
+
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `--endpoint` | API base URL | `http://localhost:8080` |
+| `--model` | Model name | `zai-org/GLM-OCR` |
+| `--prompt` | Instruction sent with the file | `Extract all text from this document` |
+| `--output` | Write output to file instead of stdout | `stdout` |
+| `--markdown` | Output as Markdown | `true` |
+| `--text` | Output as plain text (flattens tables) | `false` |
+| `--json` | Output as structured JSON | `false` |
+| `--embed` | Send files as base64 data-URIs | `false` |
+| `--raw` | Dump raw model response (debug) | `false` |
+
+---
+
+## 💡 Examples
+
+### Basic OCR
+Prints formatted Markdown to your terminal:
+```bash
 ocr scan.png
+```
 
-# Multi-page PDF — automatically split into pages before sending
+### Multi-page PDF
+Renders all pages and combines them into a single Markdown document:
+```bash
 ocr document.pdf
-
-# Plain text to a file
-ocr --text --output result.txt invoice.pdf
-
-# Structured JSON output
-ocr --json --output result.json photo.jpg
-
-# Remote server — use --embed to send file bytes instead of file:// URIs
-ocr --embed --endpoint http://10.0.0.5 --port 9000 doc.pdf
-
-# Custom prompt
-ocr --prompt "List every line item with its amount" receipt.png
-
-# Debug: see exactly what the model returned
-ocr --raw scan.png
 ```
 
-## How PDF input works
-
-The GLM-OCR API only accepts images, not raw PDF blobs.
-When a PDF is given, the CLI:
-
-1. Uses **pdfcpu** (pure Go) to count pages and split the PDF into
-   individual single-page `.pdf` files in a temporary directory.
-2. Sends every page as a separate `image_url` content part in one request.
-3. Cleans up the temporary files automatically when the process exits.
-
-For a single-page PDF the split step is skipped entirely and the original
-file is sent directly.
-
-By default pages are sent as `file://` URIs (fast, zero copy — requires
-the server to run on the same machine with access to the same filesystem).
-Pass `--embed` to base64-encode each page instead (required for remote servers).
-
-## Output formats
-
-### Markdown (default)
-
-Block labels from the model are mapped to Markdown elements:
-
-| Label | Rendered as |
-|---|---|
-| `title` | `## heading` |
-| `figure` / `caption` | *italic* |
-| `table` | verbatim (model already outputs MD tables) |
-| `text` / other | paragraph |
-
-Multi-page documents get `---` page separators.
-
-### Plain text (`--text`)
-
-Renders Markdown first, then strips all decoration and flattens
-`| col | col |` table rows to `col  col`.
-
-### JSON (`--json`)
-
-```json
-{
-  "source": "invoice.pdf",
-  "model": "zai-org/GLM-OCR",
-  "pages": 2,
-  "blocks": [
-    { "page": 1, "index": 0, "label": "title",  "content": "…", "bbox_2d": null },
-    { "page": 1, "index": 1, "label": "text",   "content": "…", "bbox_2d": null },
-    { "page": 2, "index": 0, "label": "table",  "content": "…", "bbox_2d": [x,y,w,h] }
-  ]
-}
+### Remote Server
+Use `--embed` if the vLLM server is on a different machine and cannot access your local filesystem:
+```bash
+ocr --embed --endpoint http://10.0.0.5 --port 8080 invoice.pdf
 ```
 
-`bbox_2d` is passed through as-is from the model (null or a coordinate array).
+### Structured Data
+Extract raw JSON data for programmatic use:
+```bash
+ocr --json --output result.json document.pdf
+```
 
-## Notes
+---
 
-- Progress and warnings are written to **stderr** so stdout can be safely
-  piped or redirected.
-- If the model returns plain text instead of the structured `[[{…}]]` JSON,
-  a warning is printed and the raw text is rendered through the chosen formatter.
-- Format flags (`--markdown`, `--text`, `--json`) and `--output` are fully
-  orthogonal — any combination works.
+## ⚙️ How it Works
+
+The **GLM-OCR** model requires images as input. Since it cannot process raw PDF blobs directly, this CLI performs the following steps:
+
+1. **PDF Rendering**: Uses `go-pdfium` running on the `wazero` WebAssembly engine to render PDF pages into 300 DPI images.
+2. **API Interaction**: All rendered images are sent as a sequence of `image_url` parts in a single `v1/chat/completions` request.
+3. **Structured Parsing**: The model returns a JSON array of pages. The CLI parses this and renders it through the selected formatter.
+
+---
+
+## 📦 Output Formats
+
+### 📝 Markdown (Default)
+Maps block labels (title, text, table, figure) to appropriate Markdown elements. Multi-page documents are separated by `---` lines.
+
+### 📄 Plain Text (`--text`)
+Strips all Markdown decoration and flattens tables for easy copy-pasting or grep-ing.
+
+### 🔢 JSON (`--json`)
+Returns a full structured object containing the source path, model used, and a list of all detected blocks with their coordinates (`bbox_2d`).
+
+---
+
+## ⚖️ License
+This project is licensed under the **MIT License**.

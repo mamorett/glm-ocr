@@ -232,15 +232,24 @@ func toDataURI(path string) (string, error) {
 // HTTP call
 // ---------------------------------------------------------------------------
 
-func callAPI(apiURL, model, imageURI, promptText string) (*ChatResponse, error) {
+func callAPI(apiURL, model, promptText string, imageURIs []string) (*ChatResponse, error) {
+	var content []ContentPart
+	for _, uri := range imageURIs {
+		content = append(content, ContentPart{
+			Type:     "image_url",
+			ImageURL: &ImageURL{URL: uri},
+		})
+	}
+	content = append(content, ContentPart{
+		Type: "text",
+		Text: promptText,
+	})
+
 	body, err := json.Marshal(ChatRequest{
 		Model: model,
 		Messages: []Message{{
-			Role: "user",
-			Content: []ContentPart{
-				{Type: "image_url", ImageURL: &ImageURL{URL: imageURI}},
-				{Type: "text", Text: promptText},
-			},
+			Role:    "user",
+			Content: content,
 		}},
 	})
 	if err != nil {
@@ -334,24 +343,36 @@ Examples:
 	}
 	apiURL := base + "/v1/chat/completions"
 
-	// Build image URI ----------------------------------------------------------
-	// Local server (default): file:// URI — vLLM reads the file directly.
-	// Remote server (--embed): base64 data URI — no filesystem access needed.
-	var imageURI string
-	var err error
-	if *embed {
-		imageURI, err = toDataURI(inputFile)
+	// Build image URIs ---------------------------------------------------------
+	var imageURIs []string
+	isPDF := strings.ToLower(filepath.Ext(inputFile)) == ".pdf"
+
+	if isPDF {
+		fmt.Fprintf(os.Stderr, "→ rendering PDF to images...\n")
+		var err error
+		imageURIs, err = renderPDFToDataURIs(inputFile)
+		if err != nil {
+			return fmt.Errorf("rendering PDF: %w", err)
+		}
 	} else {
-		imageURI, err = toFileURI(inputFile)
-	}
-	if err != nil {
-		return err
+		var uri string
+		var err error
+		if *embed {
+			uri, err = toDataURI(inputFile)
+		} else {
+			uri, err = toFileURI(inputFile)
+		}
+		if err != nil {
+			return err
+		}
+		imageURIs = []string{uri}
 	}
 
 	// Call API -----------------------------------------------------------------
-	fmt.Fprintf(os.Stderr, "→ POST %s  [model: %s]\n", apiURL, *model)
+	fmt.Fprintf(os.Stderr, "→ POST %s  [model: %s] [%d image(s)]\n", apiURL, *model, len(imageURIs))
 
-	cr, err := callAPI(apiURL, *model, imageURI, *prompt)
+	cr, err := callAPI(apiURL, *model, *prompt, imageURIs)
+
 	if err != nil {
 		return err
 	}
