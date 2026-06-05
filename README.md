@@ -19,9 +19,11 @@ The CLI sends rendered page images to a chat-completions endpoint. By default it
 **Quick start with vLLM (recommended):**
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model zai-org/GLM-OCR \
-  --port 8080
+vllm serve zai-org/GLM-OCR \
+  --allowed-local-media-path / \
+  --port 8080 \
+  --gpu-memory-utilization 0.75 \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}'
 ```
 
 **Remote server:**
