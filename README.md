@@ -36,10 +36,10 @@ vllm serve zai-org/GLM-OCR \
 
 **Remote server:**
 
-If the engine runs on another host, pass `-embed` so images are sent as base64 data-URIs instead of relying on the server reading your local filesystem:
+If the engine runs on another host, simply specify the endpoint. Images are automatically embedded and sent as base64 data-URIs:
 
 ```bash
-ocr -embed -endpoint http://10.0.0.5:8080 document.pdf
+ocr -endpoint http://10.0.0.5:8080 document.pdf
 ```
 
 ---
@@ -91,7 +91,6 @@ ocr [options] <file>
 | `-markdown` | Output as Markdown | `true` |
 | `-text` | Output as plain text (flattens tables) | `false` |
 | `-json` | Output as structured JSON | `false` |
-| `-embed` | Send files as base64 data-URIs | `false` |
 | `-raw` | Dump raw model response (debug) | `false` |
 
 ---
@@ -111,9 +110,9 @@ ocr document.pdf -output result.md -dpi 150
 ```
 
 ### Remote Server
-Use `-embed` if the vLLM server is on a different machine and cannot access your local filesystem:
+Specify the custom endpoint when the vLLM server is on a different machine:
 ```bash
-ocr -embed -endpoint http://10.0.0.5 invoice.pdf
+ocr -endpoint http://10.0.0.5 invoice.pdf
 ```
 
 ### Structured Data

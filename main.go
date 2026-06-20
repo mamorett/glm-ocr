@@ -314,14 +314,6 @@ func mimeType(path string) string {
 	}
 }
 
-func toFileURI(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("resolving path: %w", err)
-	}
-	return "file://" + filepath.ToSlash(abs), nil
-}
-
 func toDataURI(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -406,7 +398,6 @@ func run(args []string) error {
 	_          = fs.Bool("markdown", false, "Output as Markdown (default)")
 	fmtText    := fs.Bool("text", false, "Output as plain text")
 	fmtJSON    := fs.Bool("json", false, "Output as JSON")
-	embed      := fs.Bool("embed", false, "Force sending file as base64 data URI (auto-enabled for remote endpoints)")
 	rawMode    := fs.Bool("raw", false, "Dump raw model response and exit (debug)")
 	showVer    := fs.Bool("version", false, "Print version and exit")
 	dpi        := fs.Int("dpi", 200, "Rendering resolution for PDF pages")
@@ -487,18 +478,7 @@ Examples:
 		}
 		fmt.Fprintf(os.Stderr, "\r\033[K  %s Rendered %d PDF pages successfully\n", color(colorGreen, "✔"), len(imageURIs))
 	} else {
-		var uri string
-		var err error
-		
-		// Auto-detect if we should embed because endpoint is remote
-		isLocal := strings.Contains(base, "localhost") || strings.Contains(base, "127.0.0.1") || strings.Contains(base, "[::1]")
-		useDataURI := *embed || !isLocal
-
-		if useDataURI {
-			uri, err = toDataURI(inputFile)
-		} else {
-			uri, err = toFileURI(inputFile)
-		}
+		uri, err := toDataURI(inputFile)
 		if err != nil {
 			return err
 		}
