@@ -125,16 +125,6 @@ func isLeakedContent(content string, bbox []int) bool {
 	if isGibberish(content) {
 		return true
 	}
-	
-	if len(bbox) >= 4 {
-		w := bbox[2] - bbox[0]
-		if w > 0 && len(content) > 25 {
-			ratio := float64(len(content)) / float64(w)
-			if ratio > 0.35 {
-				return true
-			}
-		}
-	}
 	return false
 }
 
@@ -817,6 +807,74 @@ type PageMeta struct {
 	Rotation int `json:"rotation"`
 }
 
+func drawProgressBar(completed, total int, startTime time.Time, status string) {
+	if total <= 0 {
+		return
+	}
+	pct := float64(completed) / float64(total)
+	if pct > 1.0 {
+		pct = 1.0
+	}
+	barWidth := 20
+	filled := int(pct * float64(barWidth))
+	
+	var bar strings.Builder
+	for i := 0; i < barWidth; i++ {
+		if i < filled {
+			bar.WriteString("█")
+		} else {
+			bar.WriteString("░")
+		}
+	}
+	
+	elapsed := time.Since(startTime)
+	speedStr := "--s/page"
+	etaStr := "--s"
+	if completed > 0 {
+		avg := elapsed / time.Duration(completed)
+		speedStr = fmt.Sprintf("%.1fs/page", avg.Seconds())
+		remaining := total - completed
+		eta := avg * time.Duration(remaining)
+		
+		etaVal := eta.Round(time.Second)
+		if etaVal >= time.Minute {
+			etaStr = fmt.Sprintf("%dm%ds", int(etaVal.Minutes()), int(etaVal.Seconds())%60)
+		} else {
+			etaStr = fmt.Sprintf("%ds", int(etaVal.Seconds()))
+		}
+	}
+	
+	elapsedVal := elapsed.Round(time.Second)
+	var elapsedStr string
+	if elapsedVal >= time.Minute {
+		elapsedStr = fmt.Sprintf("%dm%ds", int(elapsedVal.Minutes()), int(elapsedVal.Seconds())%60)
+	} else {
+		elapsedStr = fmt.Sprintf("%ds", int(elapsedVal.Seconds()))
+	}
+	
+	statusIcon := color(colorCyan, "⏳")
+	if completed == total {
+		statusIcon = color(colorGreen, "✔")
+	}
+	
+	suffix := ""
+	if status != "" {
+		suffix = " | " + color(colorDim, status)
+	}
+	
+	fmt.Fprintf(os.Stderr, "\r\033[K  %s [%s] %3d%% | %d/%d pages | %s | Elapsed: %s | ETA: %s%s",
+		statusIcon,
+		color(colorCyan, bar.String()),
+		int(pct*100),
+		completed,
+		total,
+		speedStr,
+		elapsedStr,
+		etaStr,
+		suffix,
+	)
+}
+
 type JSONOutput struct {
 	Source string            `json:"source"`
 	Model  string            `json:"model"`
@@ -888,9 +946,6 @@ func cleanUnicodeForLatex(s string) string {
 	
 	// Strip Chinese (Han) characters
 	s = cjkRegexp.ReplaceAllString(s, "")
-	
-	// Strip other non-ASCII chars
-	s = nonASCIIRegexp.ReplaceAllString(s, "")
 	return s
 }
 
@@ -1035,6 +1090,7 @@ func htmlTableToLatex(htmlStr string) string {
 func renderLatex(pages [][]OCRBlock, source, model string) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("\\documentclass{article}\n")
+	sb.WriteString("\\usepackage[T1]{fontenc}\n")
 	sb.WriteString("\\usepackage[utf8]{inputenc}\n")
 	sb.WriteString("\\usepackage{amsmath}\n")
 	sb.WriteString("\\usepackage{amssymb}\n")
@@ -1591,9 +1647,9 @@ Examples:
 	if eng == EngineBaidu {
 		if *prompt == defaultPrompt {
 			if totalPages > 1 {
-				*prompt = "<image>Multi page Extract all text from this document"
+				*prompt = "<image>Multi page parsing."
 			} else {
-				*prompt = "<image>Extract all text from this document"
+				*prompt = "<image>document parsing."
 			}
 		}
 		if !strings.HasPrefix(*prompt, "<image>") {
@@ -1679,12 +1735,15 @@ Examples:
 		} else {
 			uris := make([]string, totalPages)
 			pageDims = make([]PageDim, totalPages)
+			if isPDF {
+				fmt.Fprintf(os.Stderr, "  %s Rendering PDF pages...\r", color(colorCyan, "⏳"))
+			}
 			for i := 0; i < totalPages; i++ {
 				var uri string
 				var dim PageDim
 				var err error
 				if isPDF {
-					fmt.Fprintf(os.Stderr, "  %s Page %d/%d: %s\r", color(colorCyan, "⏳"), i+1, totalPages, color(colorDim, "rendering page..."))
+					fmt.Fprintf(os.Stderr, "\r\033[K  %s Rendering PDF pages: %d/%d...", color(colorCyan, "⏳"), i+1, totalPages)
 					uri, dim, err = renderPDFPageToDataURI(inputFile, i, *dpi)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "\n")
@@ -1700,7 +1759,9 @@ Examples:
 				}
 				uris[i] = uri
 				pageDims[i] = dim
-				fmt.Fprintf(os.Stderr, "  %s Page %d/%d: %s\n", color(colorGreen, "✔"), i+1, totalPages, color(colorDim, "rendered"))
+			}
+			if isPDF {
+				fmt.Fprintf(os.Stderr, "\r\033[K  %s Rendered all %d pages.\n", color(colorGreen, "✔"), totalPages)
 			}
 
 			bs := *batchSize
@@ -1708,6 +1769,8 @@ Examples:
 				bs = 1
 			}
 
+			ocrStartTime := time.Now()
+			drawProgressBar(0, totalPages, ocrStartTime, "recognizing...")
 			var rawDocBuilder strings.Builder
 			for start := 0; start < totalPages; start += bs {
 				end := start + bs
@@ -1718,16 +1781,19 @@ Examples:
 				isMulti := len(batchURIs) > 1
 
 				batchPrompt := *prompt
-				if *prompt == defaultPrompt || *prompt == "<image>Multi page Extract all text from this document" || *prompt == "<image>Extract all text from this document" {
+				if *prompt == defaultPrompt || *prompt == "<image>Multi page parsing." || *prompt == "<image>document parsing." {
 					if isMulti {
-						batchPrompt = "<image>Multi page Extract all text from this document"
+						batchPrompt = "<image>Multi page parsing."
 					} else {
-						batchPrompt = "<image>Extract all text from this document"
+						batchPrompt = "<image>document parsing."
 					}
 				}
 
-				fmt.Fprintf(os.Stderr, "  %s Sending batch (pages %d-%d): %s\r", color(colorCyan, "⏳"), start+1, end, color(colorDim, "recognizing..."))
-				batchStart := time.Now()
+				if isMulti {
+					drawProgressBar(start, totalPages, ocrStartTime, fmt.Sprintf("recognizing pages %d-%d...", start+1, end))
+				} else {
+					drawProgressBar(start, totalPages, ocrStartTime, fmt.Sprintf("recognizing page %d...", start+1))
+				}
 				
 				cr, err := callAPIBaidu(apiURL, *model, batchPrompt, batchURIs, isMulti, *maxTokens)
 				if err != nil {
@@ -1744,14 +1810,14 @@ Examples:
 				}
 
 				batchContent := cr.Choices[0].Message.Content
-				duration := time.Since(batchStart).Round(100 * time.Millisecond)
-				fmt.Fprintf(os.Stderr, "\r\033[K  %s Batch (pages %d-%d): %s\n", color(colorGreen, "✔"), start+1, end, color(colorGreen, fmt.Sprintf("completed in %s", duration)))
+				drawProgressBar(end, totalPages, ocrStartTime, "")
 
 				if start > 0 {
 					rawDocBuilder.WriteString("<PAGE>")
 				}
 				rawDocBuilder.WriteString(batchContent)
 			}
+			fmt.Fprintln(os.Stderr)
 			rawDoc = rawDocBuilder.String()
 
 			if *resume && resumePath != "" {
@@ -1781,6 +1847,8 @@ Examples:
 
 	} else {
 		pageDims = make([]PageDim, totalPages)
+		ocrStartTime := time.Now()
+		drawProgressBar(0, totalPages, ocrStartTime, "recognizing...")
 		for i := 0; i < totalPages; i++ {
 			var content string
 			var found bool
@@ -1793,13 +1861,13 @@ Examples:
 			}
 			
 			if found {
-				fmt.Fprintf(os.Stderr, "  %s Page %d/%d: %s\n", color(colorGreen, "⏮"), i+1, totalPages, color(colorDim, "restored from cache (rendering skipped)"))
+				drawProgressBar(i+1, totalPages, ocrStartTime, "restored from cache")
 			} else {
 				var uri string
 				var dim PageDim
 				var err error
 				if isPDF {
-					fmt.Fprintf(os.Stderr, "  %s Page %d/%d: %s\r", color(colorCyan, "⏳"), i+1, totalPages, color(colorDim, "rendering page..."))
+					drawProgressBar(i, totalPages, ocrStartTime, fmt.Sprintf("rendering page %d...", i+1))
 					uri, dim, err = renderPDFPageToDataURI(inputFile, i, *dpi)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "\n")
@@ -1815,7 +1883,7 @@ Examples:
 				}
 				pageDims[i] = dim
 
-				fmt.Fprintf(os.Stderr, "  %s Page %d/%d: %s\r", color(colorCyan, "⏳"), i+1, totalPages, color(colorDim, "recognizing..."))
+				drawProgressBar(i, totalPages, ocrStartTime, fmt.Sprintf("recognizing page %d...", i+1))
 				
 				pageStart := time.Now()
 				cr, err := callAPI(apiURL, *model, *prompt, []string{uri}, *maxTokens)
@@ -1833,7 +1901,7 @@ Examples:
 				}
 				
 				content = cr.Choices[0].Message.Content
-				duration := time.Since(pageStart).Round(100 * time.Millisecond)
+				_ = time.Since(pageStart)
 				
 				if *resume && resumePath != "" {
 					if resumeState == nil {
@@ -1864,7 +1932,7 @@ Examples:
 					}
 				}
 				
-				fmt.Fprintf(os.Stderr, "\r\033[K  %s Page %d/%d: %s\n", color(colorGreen, "✔"), i+1, totalPages, color(colorGreen, fmt.Sprintf("completed in %s", duration)))
+				drawProgressBar(i+1, totalPages, ocrStartTime, "")
 			}
 			
 			if *rawMode {
@@ -1877,6 +1945,7 @@ Examples:
 				allPages = append(allPages, pages[0])
 			}
 		}
+		fmt.Fprintln(os.Stderr)
 	}
 
 	totalDuration := time.Since(startTime).Round(100 * time.Millisecond)

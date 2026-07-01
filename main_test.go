@@ -150,8 +150,8 @@ func TestRenderLatex(t *testing.T) {
 	if !strings.Contains(latexOut, "\\documentclass{article}") {
 		t.Error("expected output to contain article class")
 	}
-	if !strings.Contains(latexOut, "\\usepackage{graphicx}") {
-		t.Error("expected output to contain graphicx package")
+	if !strings.Contains(latexOut, "\\usepackage[T1]{fontenc}") {
+		t.Error("expected output to contain T1 fontenc package")
 	}
 	if !strings.Contains(latexOut, "\\usepackage[margin=0.75in]{geometry}") {
 		t.Error("expected output to contain geometry package with 0.75in margin")
