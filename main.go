@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"html"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
@@ -56,7 +55,12 @@ func isGibberish(content string) bool {
 		strings.Contains(lower, "24 0 24") ||
 		strings.Contains(lower, "侍") ||
 		(strings.Contains(lower, "水平") && strings.Contains(lower, "0 0")) ||
-		strings.Contains(lower, "收元铜业") {
+		strings.Contains(lower, "收元铜业") ||
+		strings.Contains(lower, "bitch") {
+		return true
+	}
+	
+	if strings.Count(lower, "\\(") >= 4 {
 		return true
 	}
 	
@@ -162,7 +166,7 @@ type Message struct {
 	Content []ContentPart `json:"content"`
 }
 
-type VLLMXargs struct {
+type CustomParams struct {
 	NgramSize  int `json:"ngram_size"`
 	WindowSize int `json:"window_size"`
 }
@@ -172,13 +176,14 @@ type ImagesConfig struct {
 }
 
 type ChatRequest struct {
-	Model             string        `json:"model"`
-	Messages          []Message     `json:"messages"`
-	Temperature       float64       `json:"temperature,omitempty"`
-	MaxTokens         int           `json:"max_tokens,omitempty"`
-	SkipSpecialTokens *bool         `json:"skip_special_tokens,omitempty"`
-	VLLMXargs         *VLLMXargs    `json:"vllm_xargs,omitempty"`
-	ImagesConfig      *ImagesConfig `json:"images_config,omitempty"`
+	Model                string        `json:"model"`
+	Messages             []Message     `json:"messages"`
+	Temperature          float64       `json:"temperature"`
+	MaxTokens            int           `json:"max_tokens,omitempty"`
+	SkipSpecialTokens    *bool         `json:"skip_special_tokens,omitempty"`
+	ImagesConfig         *ImagesConfig `json:"images_config,omitempty"`
+	CustomLogitProcessor string        `json:"custom_logit_processor,omitempty"`
+	CustomParams         *CustomParams `json:"custom_params,omitempty"`
 }
 
 type Choice struct {
@@ -607,9 +612,17 @@ func renderMarkdown(pages [][]OCRBlock, showBBox bool) string {
 			fmt.Fprintf(&sb, "\n---\n<!-- page %d -->\n\n", pi+1)
 		}
 		
-		rows := groupBlocksIntoRows(page)
+		var cleanPage []OCRBlock
+		for _, b := range page {
+			contentStr := strings.ToLower(strings.TrimSpace(blockContentString(b)))
+			if contentStr != "" && contentStr != "[non-text]" && contentStr != "[empty]" && contentStr != "[]" && contentStr != "[no text]" && contentStr != "(no text)" {
+				cleanPage = append(cleanPage, b)
+			}
+		}
+		
+		rows := groupBlocksIntoRows(cleanPage)
 		if len(rows) == 0 {
-			for _, b := range page {
+			for _, b := range cleanPage {
 				sb.WriteString(blockContentString(b))
 				sb.WriteString("\n\n")
 			}
@@ -630,17 +643,26 @@ func renderMarkdown(pages [][]OCRBlock, showBBox bool) string {
 			}
 			if maxCols > 1 {
 				for idx, r := range tableRows {
-					isLeakedRow := false
+					var cleanRow []string
 					for _, cell := range r {
 						if isLeakedContent(cell, nil) {
-							isLeakedRow = true
+							cleanRow = append(cleanRow, "")
+						} else {
+							cleanRow = append(cleanRow, cell)
+						}
+					}
+					isEmptyRow := true
+					for _, cell := range cleanRow {
+						c := strings.ToLower(strings.TrimSpace(cell))
+						if c != "" && c != "[non-text]" && c != "[empty]" && c != "[]" && c != "[no text]" && c != "(no text)" && c != "[document icon]" && c != "arrowleft" && c != "exit left" && c != "center" && c != "screen up" && c != "move the right" && c != "work around the screen" && c != "speed up the screen at the bottom left" && c != "mail group" {
+							isEmptyRow = false
 							break
 						}
 					}
-					if isLeakedRow {
+					if isEmptyRow {
 						continue
 					}
-					sb.WriteString("| " + strings.Join(r, " | ") + " |\n")
+					sb.WriteString("| " + strings.Join(cleanRow, " | ") + " |\n")
 					if idx == 0 {
 						sb.WriteString("|")
 						for c := 0; c < maxCols; c++ {
@@ -661,19 +683,49 @@ func renderMarkdown(pages [][]OCRBlock, showBBox bool) string {
 		}
 		
 		for _, row := range rows {
-			if len(row) == 1 {
-				flushTable()
-				b := row[0]
-				content := strings.TrimSpace(blockContentString(b))
-				bbox, _ := getBBox(b.BBox2D)
-				if content == "" || isLeakedContent(content, bbox) {
+			if len(row) == 1 || len(row) > 20 {
+				var parts []string
+				for _, b := range row {
+					parts = append(parts, strings.TrimSpace(blockContentString(b)))
+				}
+				content := strings.TrimSpace(strings.Join(parts, " "))
+				if content == "" {
 					continue
 				}
 				if strings.Contains(strings.ToLower(content), "<table") {
 					sb.WriteString(htmlTableToMarkdown(content) + "\n\n")
 					continue
 				}
-				switch strings.ToLower(b.Label) {
+				label := row[0].Label
+				var mergedBBox []int
+				for _, b := range row {
+					if box, ok := getBBox(b.BBox2D); ok {
+						if len(mergedBBox) == 0 {
+							mergedBBox = []int{box[0], box[1], box[2], box[3]}
+						} else {
+							if box[0] < mergedBBox[0] { mergedBBox[0] = box[0] }
+							if box[1] < mergedBBox[1] { mergedBBox[1] = box[1] }
+							if box[2] > mergedBBox[2] { mergedBBox[2] = box[2] }
+							if box[3] > mergedBBox[3] { mergedBBox[3] = box[3] }
+						}
+					}
+				}
+				if isLeakedContent(content, mergedBBox) {
+					continue
+				}
+				
+				shouldFlush := false
+				if strings.ToLower(label) == "title" || strings.ToLower(label) == "header" || strings.ToLower(label) == "caption" || strings.ToLower(label) == "figure" {
+					shouldFlush = true
+				} else if len(content) > 40 {
+					shouldFlush = true
+				} else if strings.Count(content, " ") > 5 {
+					shouldFlush = true
+				}
+				if shouldFlush {
+					flushTable()
+				}
+				switch strings.ToLower(label) {
 				case "title":
 					fmt.Fprintf(&sb, "## %s\n\n", content)
 				case "figure", "caption":
@@ -684,7 +736,8 @@ func renderMarkdown(pages [][]OCRBlock, showBBox bool) string {
 			} else {
 				var cells []string
 				for _, b := range row {
-					cells = append(cells, strings.TrimSpace(blockContentString(b)))
+					cellVal := strings.ReplaceAll(strings.TrimSpace(blockContentString(b)), "\n", " ")
+					cells = append(cells, cellVal)
 				}
 				tableRows = append(tableRows, cells)
 			}
@@ -792,176 +845,334 @@ func renderJSON(pages [][]OCRBlock, source, model string, pageDims []PageDim) (s
 	return string(bs), nil
 }
 
-func renderHTML(pages [][]OCRBlock, source, model string, pageDims []PageDim) (string, error) {
+var cjkRegexp = regexp.MustCompile(`\p{Han}`)
+var nonASCIIRegexp = regexp.MustCompile(`[^\x00-\x7F]+`)
+
+func cleanUnicodeForLatex(s string) string {
+	// Map common CJK/unicode punctuation to standard LaTeX/ASCII equivalents
+	s = strings.ReplaceAll(s, "。", ".")
+	s = strings.ReplaceAll(s, "，", ", ")
+	s = strings.ReplaceAll(s, "（", "(")
+	s = strings.ReplaceAll(s, "）", ")")
+	s = strings.ReplaceAll(s, "；", ";")
+	s = strings.ReplaceAll(s, "：", ":")
+	s = strings.ReplaceAll(s, "？", "?")
+	s = strings.ReplaceAll(s, "！", "!")
+	s = strings.ReplaceAll(s, "“", "\"")
+	s = strings.ReplaceAll(s, "”", "\"")
+	s = strings.ReplaceAll(s, "‘", "'")
+	s = strings.ReplaceAll(s, "’", "'")
+	s = strings.ReplaceAll(s, "○", "0")
+	s = strings.ReplaceAll(s, "□", "\\(\\square\\)")
+	s = strings.ReplaceAll(s, "•", "\\(\\bullet\\)")
+	s = strings.ReplaceAll(s, "π", "\\(\\pi\\)")
+	s = strings.ReplaceAll(s, "α", "\\(\\alpha\\)")
+	s = strings.ReplaceAll(s, "β", "\\(\\beta\\)")
+	s = strings.ReplaceAll(s, "λ", "\\(\\lambda\\)")
+	s = strings.ReplaceAll(s, "θ", "\\(\\theta\\)")
+	s = strings.ReplaceAll(s, "√", "\\(\\surd\\)")
+	
+	// Strip Chinese (Han) characters
+	s = cjkRegexp.ReplaceAllString(s, "")
+	
+	// Strip other non-ASCII chars
+	s = nonASCIIRegexp.ReplaceAllString(s, "")
+	return s
+}
+
+func escapeLatex(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\textbackslash ")
+	s = strings.ReplaceAll(s, "%", "\\%")
+	s = strings.ReplaceAll(s, "&", "\\&")
+	s = strings.ReplaceAll(s, "$", "\\$")
+	s = strings.ReplaceAll(s, "_", "\\_")
+	s = strings.ReplaceAll(s, "{", "\\{")
+	s = strings.ReplaceAll(s, "}", "\\}")
+	s = strings.ReplaceAll(s, "#", "\\#")
+	return s
+}
+
+func escapeLatexWithMath(s string) string {
+	s = cleanUnicodeForLatex(s)
 	var sb strings.Builder
-	sb.WriteString("<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n")
-	fmt.Fprintf(&sb, "<title>%s</title>\n", html.EscapeString(source))
-	sb.WriteString(`<style>
-body {
-  background-color: #f0f2f5;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  margin: 0;
-  padding: 24px;
-  color: #333;
-}
-.ocr-page {
-  position: relative;
-  background: #fff;
-  margin: 0 auto 24px;
-  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-  border: 1px solid #ccc;
-  box-sizing: border-box;
-  overflow: hidden;
-}
-.ocr-page-header {
-  text-align: center;
-  font-size: 14px;
-  color: #666;
-  margin-bottom: 8px;
-}
-.ocr-block {
-  box-sizing: border-box;
-  padding: 2px 4px;
-  overflow: hidden;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.ocr-title {
-  font-weight: bold;
-  font-size: 1.2em;
-}
-.ocr-header {
-  font-weight: bold;
-  font-size: 1.1em;
-}
-.ocr-section {
-  font-weight: bold;
-}
-.ocr-image, .ocr-figure, .ocr-caption {
-  font-style: italic;
-  color: #666;
-}
-.ocr-table {
-  font-family: monospace;
-  background-color: #f8f9fa;
-  border: 1px solid #dee2e6;
-  padding: 0;
-}
-.ocr-table table {
-  width: 100%;
-  height: 100%;
-  border-collapse: collapse;
-}
-.ocr-table th, .ocr-table td {
-  border: 1px solid #dee2e6;
-  padding: 4px 8px;
-  font-size: 11px;
-}
-.ocr-table th {
-  background-color: #f1f3f5;
-  font-weight: bold;
-}
-.ocr-linear-page {
-  background: #fff;
-  max-width: 800px;
-  margin: 0 auto 24px;
-  padding: 24px;
-  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-  border: 1px solid #ccc;
-  box-sizing: border-box;
-}
-.ocr-linear-block {
-  margin-bottom: 12px;
-  white-space: pre-wrap;
-}
-.ocr-linear-block table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 8px;
-}
-.ocr-linear-block th, .ocr-linear-block td {
-  border: 1px solid #dee2e6;
-  padding: 6px 12px;
-}
-.ocr-linear-block th {
-  background-color: #f1f3f5;
-}
-</style>
-</head>
-<body>
-`)
-
-	for pi, page := range pages {
-		var pd *PageDim
-		if pi < len(pageDims) {
-			pd = &pageDims[pi]
-		}
-
-		useAbsolute := false
-		var w, h int
-		if pd != nil && pd.Width > 0 && pd.Height > 0 {
-			for _, b := range page {
-				if _, ok := getBBox(b.BBox2D); ok {
-					useAbsolute = true
-					break
-				}
-			}
-			w = pd.Width
-			h = pd.Height
-		}
-
-		fmt.Fprintf(&sb, "<div class=\"ocr-page-header\">Page %d</div>\n", pi+1)
-
-		if useAbsolute {
-			fmt.Fprintf(&sb, "<div class=\"ocr-page\" style=\"width:%dpx; height:%dpx;\">\n", w, h)
-			for _, b := range page {
-				contentStr := blockContentString(b)
-				labelClass := "ocr-" + sanitizeLabel(b.Label)
-				bbox, ok := getBBox(b.BBox2D)
-				
-				var contentVal string
-				if strings.ToLower(b.Label) == "table" || strings.Contains(strings.ToLower(contentStr), "<table") {
-					contentVal = contentStr
-				} else {
-					contentVal = html.EscapeString(contentStr)
-				}
-
-				if !ok {
-					fmt.Fprintf(&sb, "  <div class=\"ocr-block %s\" style=\"position:absolute; left:0px; top:0px;\">%s</div>\n", labelClass, contentVal)
-					continue
-				}
-				x1, y1, x2, y2 := bbox[0], bbox[1], bbox[2], bbox[3]
-				left := float64(x1) / 999.0 * float64(w)
-				top := float64(y1) / 999.0 * float64(h)
-				width := float64(x2-x1) / 999.0 * float64(w)
-				height := float64(y2-y1) / 999.0 * float64(h)
-				if left < 0 { left = 0 }
-				if top < 0 { top = 0 }
-				if width < 0 { width = 0 }
-				if height < 0 { height = 0 }
-
-				fmt.Fprintf(&sb, "  <div class=\"ocr-block %s\" style=\"position:absolute; left:%.1fpx; top:%.1fpx; width:%.1fpx; height:%.1fpx;\">%s</div>\n",
-					labelClass, left, top, width, height, contentVal)
-			}
-			sb.WriteString("</div>\n")
+	parts := strings.Split(s, "\\(")
+	for i, part := range parts {
+		if i == 0 {
+			sb.WriteString(escapeLatex(part))
 		} else {
-			sb.WriteString("<div class=\"ocr-linear-page\">\n")
-			for _, b := range page {
-				contentStr := blockContentString(b)
-				labelClass := "ocr-" + sanitizeLabel(b.Label)
-				var contentVal string
-				if strings.ToLower(b.Label) == "table" || strings.Contains(strings.ToLower(contentStr), "<table") {
-					contentVal = contentStr
-				} else {
-					contentVal = html.EscapeString(contentStr)
-				}
-				fmt.Fprintf(&sb, "  <div class=\"ocr-linear-block %s\">%s</div>\n", labelClass, contentVal)
+			subparts := strings.SplitN(part, "\\)", 2)
+			if len(subparts) == 2 {
+				sb.WriteString("\\(" + subparts[0] + "\\)")
+				sb.WriteString(escapeLatex(subparts[1]))
+			} else {
+				sb.WriteString(escapeLatex("\\(" + part))
 			}
-			sb.WriteString("</div>\n")
 		}
 	}
+	return sb.String()
+}
 
-	sb.WriteString("</body>\n</html>\n")
+func htmlTableToLatex(htmlStr string) string {
+	var latexRows [][]string
+	remaining := htmlStr
+	maxCols := 0
+	
+	for {
+		trStart := strings.Index(strings.ToLower(remaining), "<tr>")
+		if trStart == -1 {
+			break
+		}
+		trEnd := strings.Index(strings.ToLower(remaining[trStart:]), "</tr>")
+		if trEnd == -1 {
+			break
+		}
+		trContent := remaining[trStart+4 : trStart+trEnd]
+		remaining = remaining[trStart+trEnd+5:]
+		
+		var cells []string
+		cellRemaining := trContent
+		for {
+			tdStart := strings.Index(strings.ToLower(cellRemaining), "<td")
+			thStart := strings.Index(strings.ToLower(cellRemaining), "<th")
+			
+			startIdx := -1
+			isTh := false
+			
+			if tdStart != -1 && (thStart == -1 || tdStart < thStart) {
+				startIdx = tdStart
+				isTh = false
+			} else if thStart != -1 {
+				startIdx = thStart
+				isTh = true
+			}
+			
+			if startIdx == -1 {
+				break
+			}
+			
+			var endTag string
+			if isTh {
+				endTag = "</th>"
+			} else {
+				endTag = "</td>"
+			}
+			
+			openBracketEnd := strings.Index(cellRemaining[startIdx:], ">")
+			if openBracketEnd == -1 {
+				break
+			}
+			openBracketEndIdx := startIdx + openBracketEnd
+			
+			tdEnd := strings.Index(strings.ToLower(cellRemaining[openBracketEndIdx:]), endTag)
+			if tdEnd == -1 {
+				break
+			}
+			tdEndIdx := openBracketEndIdx + tdEnd
+			
+			cellContent := cellRemaining[openBracketEndIdx+1 : tdEndIdx]
+			cellRemaining = cellRemaining[tdEndIdx+len(endTag):]
+			
+			cellContent = cleanHTMLText(cellContent)
+			cells = append(cells, escapeLatexWithMath(cellContent))
+		}
+		
+		if len(cells) > 0 {
+			latexRows = append(latexRows, cells)
+			if len(cells) > maxCols {
+				maxCols = len(cells)
+			}
+		}
+	}
+	
+	if len(latexRows) == 0 {
+		return escapeLatexWithMath(cleanHTMLText(htmlStr))
+	}
+	
+	var sb strings.Builder
+	sb.WriteString("\\begin{table}[h]\n\\centering\n")
+	alignStr := ""
+	for c := 0; c < maxCols; c++ {
+		alignStr += "l "
+	}
+	fmt.Fprintf(&sb, "\\begin{tabular}{%s}\n\\hline\n", strings.TrimSpace(alignStr))
+	for idx, row := range latexRows {
+		for len(row) < maxCols {
+			row = append(row, "")
+		}
+		sb.WriteString(strings.Join(row, " & ") + " \\\\\n")
+		if idx == 0 {
+			sb.WriteString("\\hline\n")
+		}
+	}
+	sb.WriteString("\\hline\n\\end{tabular}\n\\end{table}\n")
+	return sb.String()
+}
+
+func renderLatex(pages [][]OCRBlock, source, model string) (string, error) {
+	var sb strings.Builder
+	sb.WriteString("\\documentclass{article}\n")
+	sb.WriteString("\\usepackage[utf8]{inputenc}\n")
+	sb.WriteString("\\usepackage{amsmath}\n")
+	sb.WriteString("\\usepackage{amssymb}\n")
+	
+	fmt.Fprintf(&sb, "\\title{OCR Digitization of %s}\n", escapeLatexWithMath(source))
+	fmt.Fprintf(&sb, "\\author{Model: %s}\n", escapeLatexWithMath(model))
+	sb.WriteString("\\date{\\today}\n\n")
+	
+	sb.WriteString("\\begin{document}\n\\maketitle\n\n")
+	
+	for pi, page := range pages {
+		if pi > 0 {
+			sb.WriteString("\\newpage\n\n")
+		}
+		
+		var cleanPage []OCRBlock
+		for _, b := range page {
+			contentStr := strings.ToLower(strings.TrimSpace(blockContentString(b)))
+			if contentStr != "" && contentStr != "[non-text]" && contentStr != "[empty]" && contentStr != "[]" && contentStr != "[no text]" && contentStr != "(no text)" {
+				cleanPage = append(cleanPage, b)
+			}
+		}
+		
+		rows := groupBlocksIntoRows(cleanPage)
+		if len(rows) == 0 {
+			for _, b := range cleanPage {
+				content := strings.TrimSpace(blockContentString(b))
+				if content != "" {
+					sb.WriteString(escapeLatexWithMath(content) + "\n\n")
+				}
+			}
+			continue
+		}
+		
+		var tableRows [][]string
+		
+		flushTable := func() {
+			if len(tableRows) == 0 {
+				return
+			}
+			maxCols := 0
+			for _, r := range tableRows {
+				if len(r) > maxCols {
+					maxCols = len(r)
+				}
+			}
+			if maxCols > 1 {
+				sb.WriteString("\\begin{table}[h]\n\\centering\n")
+				alignStr := ""
+				for c := 0; c < maxCols; c++ {
+					alignStr += "l "
+				}
+				fmt.Fprintf(&sb, "\\begin{tabular}{%s}\n\\hline\n", strings.TrimSpace(alignStr))
+				
+				for idx, r := range tableRows {
+					var cleanRow []string
+					for _, cell := range r {
+						if isLeakedContent(cell, nil) {
+							cleanRow = append(cleanRow, "")
+						} else {
+							cleanRow = append(cleanRow, escapeLatexWithMath(cell))
+						}
+					}
+					for len(cleanRow) < maxCols {
+						cleanRow = append(cleanRow, "")
+					}
+					
+					// Skip row if completely empty
+					isEmptyRow := true
+					for _, cell := range cleanRow {
+						c := strings.ToLower(strings.TrimSpace(cell))
+						if c != "" && c != "[non-text]" && c != "[empty]" && c != "[]" && c != "[no text]" && c != "(no text)" {
+							isEmptyRow = false
+							break
+						}
+					}
+					if isEmptyRow {
+						continue
+					}
+					
+					sb.WriteString(strings.Join(cleanRow, " & ") + " \\\\\n")
+					if idx == 0 {
+						sb.WriteString("\\hline\n")
+					}
+				}
+				sb.WriteString("\\hline\n\\end{tabular}\n\\end{table}\n\n")
+			} else {
+				for _, r := range tableRows {
+					if len(r) > 0 {
+						sb.WriteString(escapeLatexWithMath(r[0]) + "\n\n")
+					}
+				}
+			}
+			tableRows = nil
+		}
+		
+		for _, row := range rows {
+			if len(row) == 1 || len(row) > 20 {
+				var parts []string
+				for _, b := range row {
+					parts = append(parts, strings.TrimSpace(blockContentString(b)))
+				}
+				content := strings.TrimSpace(strings.Join(parts, " "))
+				if content == "" {
+					continue
+				}
+				if strings.Contains(strings.ToLower(content), "<table") {
+					sb.WriteString(htmlTableToLatex(content) + "\n\n")
+					continue
+				}
+				label := row[0].Label
+				var mergedBBox []int
+				for _, b := range row {
+					if box, ok := getBBox(b.BBox2D); ok {
+						if len(mergedBBox) == 0 {
+							mergedBBox = []int{box[0], box[1], box[2], box[3]}
+						} else {
+							if box[0] < mergedBBox[0] { mergedBBox[0] = box[0] }
+							if box[1] < mergedBBox[1] { mergedBBox[1] = box[1] }
+							if box[2] > mergedBBox[2] { mergedBBox[2] = box[2] }
+							if box[3] > mergedBBox[3] { mergedBBox[3] = box[3] }
+						}
+					}
+				}
+				if isLeakedContent(content, mergedBBox) {
+					continue
+				}
+				
+				shouldFlush := false
+				if strings.ToLower(label) == "title" || strings.ToLower(label) == "header" || strings.ToLower(label) == "caption" || strings.ToLower(label) == "figure" {
+					shouldFlush = true
+				} else if len(content) > 40 {
+					shouldFlush = true
+				} else if strings.Count(content, " ") > 5 {
+					shouldFlush = true
+				}
+				if shouldFlush {
+					flushTable()
+				}
+				switch strings.ToLower(label) {
+				case "title":
+					fmt.Fprintf(&sb, "\\section{%s}\n\n", escapeLatexWithMath(content))
+				case "header":
+					fmt.Fprintf(&sb, "\\subsection{%s}\n\n", escapeLatexWithMath(content))
+				case "figure", "caption":
+					fmt.Fprintf(&sb, "\\begin{figure}[h]\n\\centering\n\\caption{%s}\n\\end{figure}\n\n", escapeLatexWithMath(content))
+				default:
+					sb.WriteString(escapeLatexWithMath(content) + "\n\n")
+				}
+			} else {
+				var cells []string
+				for _, b := range row {
+					cellVal := strings.ReplaceAll(strings.TrimSpace(blockContentString(b)), "\n", " ")
+					cells = append(cells, cellVal)
+				}
+				tableRows = append(tableRows, cells)
+			}
+		}
+		flushTable()
+	}
+	
+	sb.WriteString("\\end{document}\n")
 	return sb.String(), nil
 }
 
@@ -1144,7 +1355,7 @@ func doChatRequest(apiURL string, body []byte) (*ChatResponse, error) {
 	return &cr, nil
 }
 
-func callAPI(apiURL, model, promptText string, imageURIs []string) (*ChatResponse, error) {
+func callAPI(apiURL, model, promptText string, imageURIs []string, maxTokens int) (*ChatResponse, error) {
 	var content []ContentPart
 	for _, uri := range imageURIs {
 		content = append(content, ContentPart{
@@ -1157,13 +1368,19 @@ func callAPI(apiURL, model, promptText string, imageURIs []string) (*ChatRespons
 		Text: promptText,
 	})
 
+	mt := maxTokens
+	if mt <= 0 {
+		mt = 8192
+	}
+
 	body, err := json.Marshal(ChatRequest{
 		Model: model,
 		Messages: []Message{{
 			Role:    "user",
 			Content: content,
 		}},
-		Temperature: 0.1,
+		Temperature: 0.0,
+		MaxTokens:   mt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshalling request: %w", err)
@@ -1200,7 +1417,7 @@ func callAPIBaidu(apiURL, model, promptText string, imageURIs []string, multi bo
 		imageMode = "base"
 	}
 
-	vllmX := &VLLMXargs{
+	custParams := &CustomParams{
 		NgramSize:  35,
 		WindowSize: windowSize,
 	}
@@ -1209,16 +1426,17 @@ func callAPIBaidu(apiURL, model, promptText string, imageURIs []string, multi bo
 	}
 
 	body, err := json.Marshal(ChatRequest{
-		Model:             model,
-		Messages:          []Message{{
+		Model:                model,
+		Messages:             []Message{{
 			Role:    "user",
 			Content: content,
 		}},
-		Temperature:       temp,
-		MaxTokens:         mt,
-		SkipSpecialTokens: &skipSpecial,
-		VLLMXargs:         vllmX,
-		ImagesConfig:      imgCfg,
+		Temperature:          temp,
+		MaxTokens:            mt,
+		SkipSpecialTokens:    &skipSpecial,
+		ImagesConfig:         imgCfg,
+		CustomLogitProcessor: "DeepseekOCRNoRepeatNGramLogitProcessor",
+		CustomParams:         custParams,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshalling request: %w", err)
@@ -1243,7 +1461,7 @@ func run(args []string) error {
 	_          = fs.Bool("markdown", false, "Output as Markdown (default)")
 	fmtText    := fs.Bool("text", false, "Output as plain text")
 	fmtJSON    := fs.Bool("json", false, "Output as JSON")
-	fmtHTML    := fs.Bool("html", false, "Output as HTML with blocks positioned by bounding box (2D layout reconstruction)")
+	fmtLatex   := fs.Bool("latex", false, "Output as LaTeX document")
 	showBBox   := fs.Bool("bbox", false, "Embed normalized bounding boxes as HTML comments in markdown output")
 	rawMode    := fs.Bool("raw", false, "Dump raw model response and exit (debug)")
 	showVer    := fs.Bool("version", false, "Print version and exit")
@@ -1560,7 +1778,7 @@ Examples:
 				fmt.Fprintf(os.Stderr, "  %s Page %d/%d: %s\r", color(colorCyan, "⏳"), i+1, totalPages, color(colorDim, "recognizing..."))
 				
 				pageStart := time.Now()
-				cr, err := callAPI(apiURL, *model, *prompt, []string{uri})
+				cr, err := callAPI(apiURL, *model, *prompt, []string{uri}, *maxTokens)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "\n")
 					return fmt.Errorf("API call for page %d: %w", i+1, err)
@@ -1616,7 +1834,7 @@ Examples:
 			
 			pages, _ := parseOCRContent(content)
 			if len(pages) > 0 {
-				allPages = append(allPages, mergeHorizontalPageBlocks(pages[0]))
+				allPages = append(allPages, pages[0])
 			}
 		}
 	}
@@ -1639,10 +1857,10 @@ Examples:
 		}
 	case *fmtText:
 		result = renderPlainText(allPages)
-	case *fmtHTML:
-		result, err = renderHTML(allPages, inputFile, *model, pageDims)
+	case *fmtLatex:
+		result, err = renderLatex(allPages, inputFile, *model)
 		if err != nil {
-			return fmt.Errorf("encoding HTML: %w", err)
+			return fmt.Errorf("encoding LaTeX: %w", err)
 		}
 	default:
 		result = renderMarkdown(allPages, *showBBox)

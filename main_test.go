@@ -131,7 +131,7 @@ func TestParseBaiduContent_Malformed(t *testing.T) {
 	}
 }
 
-func TestRenderHTML(t *testing.T) {
+func TestRenderLatex(t *testing.T) {
 	pages := [][]OCRBlock{
 		{
 			{Index: 0, Label: "title", Content: "Invoice Number 42", BBox2D: []int{33, 58, 372, 117}},
@@ -141,42 +141,30 @@ func TestRenderHTML(t *testing.T) {
 			{Index: 0, Label: "title", Content: "Page Two", BBox2D: []int{33, 82, 202, 143}},
 		},
 	}
-	dims := []PageDim{
-		{Width: 800, Height: 400, DPI: 200, Rotation: 0},
-		{Width: 800, Height: 400, DPI: 200, Rotation: 0},
-	}
 
-	htmlOut, err := renderHTML(pages, "test.pdf", "some-model", dims)
+	latexOut, err := renderLatex(pages, "test.pdf", "some-model")
 	if err != nil {
-		t.Fatalf("renderHTML error: %v", err)
+		t.Fatalf("renderLatex error: %v", err)
 	}
 
-	if !strings.Contains(htmlOut, "class=\"ocr-page\"") {
-		t.Error("expected output to contain ocr-page class")
+	if !strings.Contains(latexOut, "\\documentclass{article}") {
+		t.Error("expected output to contain article class")
 	}
-	if !strings.Contains(htmlOut, "Page Two") {
+	if !strings.Contains(latexOut, "Page Two") {
 		t.Error("expected output to contain 'Page Two'")
 	}
-	if !strings.Contains(htmlOut, "left:26.4px") && !strings.Contains(htmlOut, "left:26.") {
-		t.Errorf("expected left positioning around 26px, html:\n%s", htmlOut)
+	if !strings.Contains(latexOut, "Invoice Number 42") {
+		t.Error("expected output to contain 'Invoice Number 42'")
 	}
 }
 
-func TestRenderHTML_NoBBox(t *testing.T) {
-	pages := [][]OCRBlock{
-		{
-			{Index: 0, Label: "title", Content: "Heading without box"},
-		},
-	}
-	dims := []PageDim{
-		{Width: 800, Height: 400, DPI: 200, Rotation: 0},
-	}
-	htmlOut, err := renderHTML(pages, "test.pdf", "some-model", dims)
-	if err != nil {
-		t.Fatalf("renderHTML error: %v", err)
-	}
-	if !strings.Contains(htmlOut, "ocr-linear-page") {
-		t.Error("expected output to fallback to ocr-linear-page")
+func TestHTMLTableToLatex(t *testing.T) {
+	htmlTable := "<table><tr><th>Header 1</th><th>Header 2</th></tr><tr><td>Cell 1</td><td>Cell 2</td></tr></table>"
+	expected := "\\begin{table}[h]\n\\centering\n\\begin{tabular}{l l}\n\\hline\nHeader 1 & Header 2 \\\\\n\\hline\nCell 1 & Cell 2 \\\\\n\\hline\n\\end{tabular}\n\\end{table}\n"
+	
+	result := htmlTableToLatex(htmlTable)
+	if result != expected {
+		t.Errorf("expected:\n%s\ngot:\n%s", expected, result)
 	}
 }
 
